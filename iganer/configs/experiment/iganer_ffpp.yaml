@@ -1,0 +1,11 @@
+# Experiment: IGANER factorial ablation on FF++ (c23), eval zero-shot.
+detector:
+  type: stub          # switch to 'cift' for real runs
+train:
+  epochs: 80
+  batch_size: 32
+game:
+  total_epochs: 80
+wandb:
+  project: iganer
+  name: ffpp_c23_tableA

@@ -1,0 +1,73 @@
+# ============================================================
+# IGANER — default config. Override anything on the CLI.
+# ============================================================
+seed: 42
+device: cuda
+
+# --- the three ablation factors (Table A) ---
+factors:
+  game: true          # A: learned PPO concealer (true) vs fixed random policy (false)
+  targeting: true     # B: suppression masked to detector saliency (true) vs uniform (false)
+  protection: true    # C: identity-gap protection on reward + detector (true) vs off (false)
+
+data:
+  name: ffpp
+  url: "https://github.com/ondyari/FaceForensics"   # EULA required
+  root: null          # null => SyntheticFFPP (smoke). Set to FF++ frames root.
+  compression: c23
+  image_size: 256
+  manipulations: [Deepfakes, Face2Face, FaceSwap, NeuralTextures]
+  num_workers: 8
+  synth_n: 512        # synthetic dataset size when root=null
+
+detector:
+  type: stub          # 'stub' (runnable) or 'cift' (wire CIFTAdapter)
+  ckpt: null
+
+probe:
+  ckpt: outputs/ckpt/artifact_probe.pt
+  pretrain_epochs: 5
+
+concealer:
+  operators: [blur, fft_lowpass, jpeg, bilateral]
+  strength_levels: 4
+  hidden: 256
+  lr: 3.0e-5
+  clip: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  ppo_epochs: 4
+
+reward:
+  alpha: 1.0          # conceal what the detector used
+  beta: 0.5           # protect identity gap (concealer side, gated by factor C)
+  gamma: 0.3          # realism
+  delta_protect: 0.2  # identity-gap preservation on detector side (gated by factor C)
+  use_lpips: true
+
+game:
+  total_epochs: 80
+  ema_decay: 0.99
+  replay_cap: 2048
+
+losses:
+  focal_gamma: 2.0
+
+train:
+  epochs: 80
+  batch_size: 32
+  lr: 1.0e-4
+  weight_decay: 5.0e-4
+  log_every: 50
+  ckpt_dir: outputs/ckpt
+
+eval:
+  curve_operator: fft_lowpass   # operator swept for the Δ-drop certificate
+  curve_points: 11
+
+wandb:
+  enabled: true
+  project: iganer
+  entity: null
+  mode: online
+  name: null

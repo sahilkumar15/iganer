@@ -1,0 +1,103 @@
+# ════════════════════════════════════════════════════════════════════════════
+# IGANER — Identity-Gap Adversarial Nash Equilibrium via Reinforcement learning
+# Concealment-game training on top of CIFT. CIFT-schema config (read by
+# datasets.create_dataset / cldm.create_model) + IGANER blocks (factors / game).
+# ════════════════════════════════════════════════════════════════════════════
+seed: 3407
+device: cuda
+ckpt_path: null                       # SD1.5+ControlNet init; null => ./models/control_sd15_ini.ckpt
+
+# ---------- CIFT dataset schema (FF++ single-domain, paper protocol) ----------
+dataset:
+  name: "ffpp_rela"                   # paired donor/target for CIFT identity stream
+  ffpp_rela:
+    data_root: "/path/to/datasets/ffpp"     # <-- FF++ root (https://github.com/ondyari/FaceForensics, EULA)
+    relation_data: true               # loads donor reference x_s (CIFT privileged stream)
+    use_splits: true
+    strict_splits: true
+    splits_dirname: "splits"
+    csv_dirname: "split_csv2"
+    image_size: 256
+
+# ---------- CIFT detector / model ----------
+detector:
+  type: cift
+  cift_ckpt: null                     # optional: resume from a trained CIFT checkpoint
+model:
+  backbone: "convnextv2_base"
+
+# CIFT ablation flags (keep all true = full CIFT detector inside the game)
+ablation:
+  use_diffusion_loss: true
+  use_dual_upsample:  true
+  use_mamba_head:     true
+  use_global_smc:     true
+  use_dimf:           true
+  use_igl:            true
+  use_gap_loss:       true
+  dual_drop_prob:     0.15
+  use_type_tokens:    true
+
+# ---------- IGANER: the three ablation factors (Table A) ----------
+factors:
+  game: true            # A: learned PPO concealer vs fixed random suppression
+  targeting: true       # B: suppression masked to detector saliency vs uniform
+  protection: true      # C: identity-gap protection (reward + detector)
+
+concealer:
+  operators: [blur, fft_lowpass, jpeg, bilateral]
+  strength_levels: 4
+  hidden: 256
+  lr: 3.0e-5
+  clip: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  ppo_epochs: 4
+
+reward:
+  alpha: 1.0            # conceal what the detector used
+  beta: 0.5            # protect identity gap (concealer side, gated by C)
+  gamma: 0.3           # realism
+  delta_protect: 0.2   # identity-gap preservation on detector side (gated by C)
+  use_lpips: true
+
+game:
+  total_epochs: 80
+  ema_decay: 0.99
+  use_ema: false       # deep-copying the full SD model is heavy; false = live target
+  replay_cap: 2048
+
+probe:
+  ckpt: outputs/ckpt/artifact_probe.pt
+  pretrain_epochs: 5
+
+eval:
+  curve_operator: fft_lowpass
+  curve_points: 11
+
+losses:
+  focal_gamma: 2.0
+
+# ---------- CIFT-schema train / val ----------
+train:
+  epochs: 80
+  lr: 1.0e-4
+  batch_size: 32
+  num_workers: 4
+  weight_decay: 5.0e-4
+  log_every: 50
+  ckpt_dir: outputs/ckpt
+val:
+  batch_size: 32
+  num_workers: 4
+
+# IGANER trainer also reads data.num_workers; mirror CIFT's train.num_workers
+data:
+  num_workers: 4
+
+wandb:
+  enabled: true
+  project: iganer
+  entity: null
+  mode: online
+  name: iganer_ffpp_tableA
