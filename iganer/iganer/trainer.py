@@ -7,10 +7,19 @@ by reading three booleans from cfg.factors:
 
 Both scripts/train.py (single variant) and scripts/run_ablation_tableA.py (all 8)
 call train_variant(). This is the modular core of the project.
+
+Patched: adds a flushed console heartbeat (so progress is visible even when
+W&B is enabled and swallows logger.log), a tqdm progress bar, and an optional
+cfg.train.max_steps cap for fast end-to-end smoke tests on the real CIFT model.
 """
-import os, torch
+import os, sys, time, torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+
+try:
+    from tqdm import tqdm
+except Exception:                       # tqdm optional
+    def tqdm(x, **k): return x
 
 from .data.ffpp import build_dataset
 from .detector.interface import build_detector
@@ -24,6 +33,12 @@ from .game.ema import EMADetector
 from .game.replay import ConcealReplay
 from .game.curriculum import Curriculum
 from .eval import plain_auc
+
+
+def _hb(msg):
+    """Heartbeat: always prints to the real console, immediately flushed."""
+    print(msg, flush=True)
+    sys.stdout.flush()
 
 
 def _get_lpips(cfg, device):
@@ -46,6 +61,13 @@ def train_variant(cfg, logger, tag="run", probe=None,
     A = bool(cfg.factors.game)
     B = bool(cfg.factors.targeting)
     C = bool(cfg.factors.protection)
+
+    # optional smoke-test cap: cfg.train.max_steps (0 / absent => full epochs)
+    max_steps = int(cfg.train.get("max_steps", 0) or 0)
+    log_every = int(cfg.train.get("log_every", 50))
+
+    _hb(f"[{tag}] starting  A(game)={A} B(target)={B} C(protect)={C}  "
+        f"device={device}  max_steps={max_steps or 'full'}")
 
     if val_ds is None:
         val_ds = build_dataset(cfg, "val")
@@ -75,12 +97,18 @@ def train_variant(cfg, logger, tag="run", probe=None,
     lpips_fn = _get_lpips(cfg, device)
     det_opt = torch.optim.AdamW(detector.parameters(), lr=cfg.train.lr,
                                 weight_decay=cfg.train.weight_decay)
+    _hb(f"[{tag}] optimizer + bank ready (n_actions={bank.n_actions}); entering loop")
 
     step = 0
+    t_last = time.time()
+    stop = False
     for epoch in range(cfg.train.epochs):
+        if stop: break
         cap = curr.strength_cap(epoch)
         if A: ppo.ent = cfg.concealer.entropy_coef * curr.explore_coef(epoch)
-        for x, y in tl:
+
+        pbar = tqdm(tl, desc=f"[{tag}] ep{epoch}", dynamic_ncols=True, leave=False)
+        for x, y in pbar:
             x, y = x.to(device), y.to(device)
             fake_idx = torch.where(y == 1)[0]
             x_til_full = x.clone()
@@ -126,12 +154,27 @@ def train_variant(cfg, logger, tag="run", probe=None,
             det_opt.zero_grad(); det_loss.backward(); det_opt.step()
             if det_ema is not None: det_ema.update(detector)
 
-            if step % cfg.train.log_every == 0:
+            # ---- visibility: tqdm bar + flushed console heartbeat + W&B ----
+            if hasattr(pbar, "set_postfix"):
+                pbar.set_postfix(loss=f"{det_loss.item():.4f}", cap=f"{cap:.2f}")
+            if step % log_every == 0:
+                dt = time.time() - t_last
+                ips = (log_every / dt) if (step > 0 and dt > 0) else 0.0
+                _hb(f"[{tag}] step={step} epoch={epoch} det_loss={det_loss.item():.4f} "
+                    f"cap={cap:.3f} {ips:.2f} it/s")
+                t_last = time.time()
                 logger.log({"tag": tag, "epoch": epoch, "det_loss": det_loss.item(),
                             "cap": cap, **log_extra}, step)
             step += 1
 
+            if max_steps and step >= max_steps:
+                _hb(f"[{tag}] hit max_steps={max_steps}; stopping early for smoke test")
+                stop = True
+                break
+
+    _hb(f"[{tag}] training done ({step} steps); running val AUC ...")
     v_auc, v_eer = plain_auc(detector, val_ds, cfg, device)
+    _hb(f"[{tag}] val_auc={v_auc:.4f} val_eer={v_eer:.4f}")
     metrics = {"val_auc": v_auc, "val_eer": v_eer}
     if cfg.train.ckpt_dir:
         os.makedirs(cfg.train.ckpt_dir, exist_ok=True)
