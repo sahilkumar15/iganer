@@ -1,0 +1,379 @@
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER — Identity-Gap Adversarial Nash Equilibrium via Reinforcement learning
+# ════════════════════════════════════════════════════════════════════════════════════
+# This config extends the real CIFT schema (train_cift_generalized.yaml).
+# Everything CIFT needs is preserved exactly. IGANER blocks are added at the bottom.
+#
+# HOW IT WORKS:
+#   - CIFT builds the detector (DiffusionFake + GuideNet + MambaHead)
+#   - IGANER wraps it in CIFTAdapter and trains a concealment game on top
+#   - RL game is training-only; inference is plain CIFT — no extra cost
+#
+# RUN:
+#   Single variant (full IGANER):
+#     CUDA_VISIBLE_DEVICES=0 python train_iganer.py -c configs/iganer/iganer_ffpp.yaml --mode single --tag iganer
+#
+#   Full Table A (all 8 cells):
+#     CUDA_VISIBLE_DEVICES=0 python train_iganer.py -c configs/iganer/iganer_ffpp.yaml --mode tableA
+#
+#   Quick decisive check (baseline vs IGANER only):
+#     CUDA_VISIBLE_DEVICES=0 python train_iganer.py -c configs/iganer/iganer_ffpp.yaml --mode tableA --only 1,8
+# ════════════════════════════════════════════════════════════════════════════════════
+
+seed: 3407
+torch_home: ""
+froze: false
+ckpt_path: null                      # SD1.5+ControlNet init; null = ./models/control_sd15_ini.ckpt
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# DATASET — exactly CIFT schema
+# For IGANER we use ffpp_rela (single-domain, paper protocol, fastest for Table A).
+# Switch to "mixed" for multi-domain fine-tuning after Table A is done.
+# ════════════════════════════════════════════════════════════════════════════════════
+dataset:
+  name: "ffpp_rela"               # single-domain for Table A sweep; "mixed" for fine-tune
+
+  mixed:
+    total_per_epoch: 100000
+    domains:
+      - name: ffpp_rela
+        weight: 0.99
+        config_key: ffpp_rela
+        split: train
+      - name: celeb_df
+        weight: 0.07
+        config_key: celeb_df_train
+        split: train
+      - name: dfd
+        weight: 0.12
+        config_key: dfd_train
+        split: train
+      - name: wild_deepfake
+        weight: 0.05
+        config_key: wild_deepfake_train
+        split: train
+      - name: diffswap
+        weight: 0.001
+        config_key: diffswap_train
+        split: train
+
+  # ── FF++ (primary — always keep) ──────────────────────────────────────────────
+  ffpp_rela:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/ffpp"   # ← YOUR FF++ ROOT
+    data_types: ""
+    compressions: "c23"
+    num_frames: 50
+    methods: ["youtube", "Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
+    has_mask: false
+    balance: true
+    relation_data: true            # CRITICAL: loads donor reference x_s for CIFT identity stream
+    similarity: false
+    similarity_path: null
+    use_splits: true
+    strict_splits: true
+    splits_dirname: "splits"
+    csv_dirname: "split_csv2"
+    random_patch: null
+
+  # ── CelebDF-V2 ────────────────────────────────────────────────────────────────
+  celeb_df_train:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/celebdf"   # ← YOUR CELEBDF ROOT
+    num_frames: 50
+    methods: "both"
+    control: true
+    alb: true
+    split_csv: "/scratch/sahil/projects/img_deepfake/datasets/celebdf/split_csv2/celeb_df_v2_train.csv"
+    strict_csv: false
+    min_frames: 1
+    mtcnn_suffix: "-mtcnn"
+    image_size: 256
+    skip_bad_images: true
+    sbi_prob: 0.40
+    freq_aug_prob: 0.25
+    use_sbi: true
+
+  # ── DFD ───────────────────────────────────────────────────────────────────────
+  dfd_train:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/dfd"         # ← YOUR DFD ROOT
+    split_csv: "/scratch/sahil/projects/img_deepfake/datasets/dfd/split_csv2/dfd_train.csv"
+    num_frames: 50
+    image_size: 256
+    min_frames: 1
+    mtcnn_suffix: "-mtcnn"
+    strict_csv: false
+    skip_bad_images: true
+    methods: "both"
+    eval_k_frames_per_video: 50
+    eval_balance_classes: false
+    sbi_prob: 0.35
+    freq_aug_prob: 0.25
+    use_sbi: true
+
+  # ── WildDeepfake ──────────────────────────────────────────────────────────────
+  wild_deepfake_train:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/wild_deepfake"  # ← YOUR WILDDEEPFAKE ROOT
+    split_csv: "/scratch/sahil/projects/img_deepfake/datasets/wild_deepfake/split_csv2/wilddeepfake_train.csv"
+    image_size: 256
+    strict_csv: false
+    skip_bad_images: true
+    methods: "both"
+
+  # ── DiffSwap ──────────────────────────────────────────────────────────────────
+  diffswap_train:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/diffswap"     # ← YOUR DIFFSWAP ROOT
+    split_csv: "/scratch/sahil/projects/img_deepfake/datasets/diffswap/split_csv2/diffswap_train.csv"
+    image_size: 256
+    strict_csv: false
+    skip_bad_images: true
+    methods: "both"
+
+# ── Validation (always FF++, matches CIFT paper protocol) ─────────────────────────
+val_dataset:
+  name: "ffpp_rela"
+  ffpp_rela:
+    data_root: "/scratch/sahil/projects/img_deepfake/datasets/ffpp"   # ← same as train ffpp above
+    data_types: ""
+    compressions: "c23"
+    num_frames: 50
+    methods: ["youtube", "Deepfakes", "Face2Face", "FaceSwap", "NeuralTextures"]
+    has_mask: false
+    balance: false
+    relation_data: true
+    similarity: false
+    similarity_path: null
+    use_splits: true
+    strict_splits: true
+    splits_dirname: "splits"
+    csv_dirname: "split_csv2"
+    random_patch: null
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# TRANSFORMS — exactly CIFT
+# ════════════════════════════════════════════════════════════════════════════════════
+transform:
+  image_size: 256
+  mean: [0.5, 0.5, 0.5]
+  std:  [0.5, 0.5, 0.5]
+  aug:
+    enable: true
+    jpeg_quality:        [30, 100]
+    blur_prob:           0.25
+    noise_prob:          0.25
+    color_jitter_prob:   0.30
+    grayscale_prob:      0.08
+    random_erasing_prob: 0.15
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# TRAINING — CIFT schema
+# For Table A ablation use lower epochs per cell (e.g. 20) to be practical.
+# For the final IGANER run use 80.
+# ════════════════════════════════════════════════════════════════════════════════════
+train:
+  epochs: 80                       # 80 for paper run; reduce for quick Table A sweep
+  lr: 2e-5                         # 2e-5 for ffpp_rela single-domain
+  weight_decay: 5e-4
+  batch_size: 32
+  accumulate_grad_batches: 4       # effective batch = 128
+  num_workers: 4
+  shuffle: true
+  drop_last: true
+  logger_freq: 5000
+  resume_ckpt: null                # null = start fresh; "auto" = resume last.ckpt
+  grad_clip_val: 0.5
+  head_lr_mult: 1.2
+  log_every: 50
+  ckpt_dir: outputs/ckpt
+  scheduler:
+    name: cosine_warmup
+    interval: step
+    cosine_warmup:
+      warmup_steps: 2000
+      min_lr_factor: 0.05
+
+val:
+  batch_size: 32
+  num_workers: 4
+  shuffle: false
+  drop_last: false
+  max_items: null
+
+test:
+  batch_size: 1
+  num_workers: 2
+  shuffle: false
+  drop_last: false
+  threshold: 0.5
+  max_items: null
+
+# IGANER trainer also reads data.num_workers — mirrors train block
+data:
+  num_workers: 4
+  image_size: 256
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# MODEL — exactly CIFT
+# ════════════════════════════════════════════════════════════════════════════════════
+model:
+  backbone: "convnextv2_base"      # "convnextv2_large" for +capacity
+
+# CIFT checkpoint to start the game from (strongly recommended)
+# Use your best CIFT checkpoint so the RL game starts from a competent detector.
+detector:
+  type: cift
+  cift_ckpt: null                  # ← SET THIS: path to your best CIFT .ckpt
+                                   #   e.g. experiments/CIFT_mix5_3/ckpt/cift-best-eer-epoch=XX.ckpt
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# CIFT ABLATION FLAGS — all true = full CIFT detector inside the game
+# Do not change these for IGANER experiments (they control CIFT internals).
+# ════════════════════════════════════════════════════════════════════════════════════
+ablation:
+  use_diffusion_loss: true
+  use_dual_upsample:  true
+  use_mamba_head:     true
+  use_global_smc:     true
+  use_dimf:           true
+  use_igl:            true
+  use_gap_loss:       true
+  dual_drop_prob:     0.15
+  use_type_tokens:    true
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: THE THREE ABLATION FACTORS (Table A)
+# These toggle the three novel components of the concealment game.
+# train_iganer.py reads these; CIFT's train.py ignores them.
+#
+#   A = game:       true  → learned PPO Concealer (Nash game)
+#                   false → fixed random suppression (no game)
+#   B = targeting:  true  → suppression masked to detector saliency (targeted)
+#                   false → uniform suppression across the whole image
+#   C = protection: true  → identity-gap preserved in reward + detector loss
+#                   false → no protection (agent can destroy the forensic signal)
+#
+# Default = full IGANER (all true). Override on CLI for individual cells:
+#   factors.game=false factors.targeting=false factors.protection=false  → v1 baseline
+#   factors.game=true  factors.targeting=false factors.protection=false  → v2 game only
+# ════════════════════════════════════════════════════════════════════════════════════
+factors:
+  game: true
+  targeting: true
+  protection: true
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: CONCEALER (PPO POLICY)
+# ════════════════════════════════════════════════════════════════════════════════════
+concealer:
+  operators: [blur, fft_lowpass, jpeg, bilateral]
+  strength_levels: 4
+  hidden: 256
+  lr: 3.0e-5
+  clip: 0.2
+  entropy_coef: 0.01
+  value_coef: 0.5
+  ppo_epochs: 4
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: CONCEALER REWARD
+# r = alpha*[D(x)-D(x_tilde)]_+  - beta*[Delta(x)-Delta(x_tilde)]_+  - gamma*LPIPS
+#   alpha: reward for successfully concealing what the detector used
+#   beta:  penalty for destroying the identity gap (anti reward-hacking, factor C)
+#   gamma: penalty for making the image unrealistic
+#   delta_protect: detector-side identity-gap regularizer weight (factor C)
+# ════════════════════════════════════════════════════════════════════════════════════
+reward:
+  alpha: 1.0
+  beta: 0.5
+  gamma: 0.3
+  delta_protect: 0.2
+  use_lpips: true
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: GAME SETTINGS
+# use_ema: false recommended for CIFT mode (avoids deep-copying the full SD model)
+# ════════════════════════════════════════════════════════════════════════════════════
+game:
+  total_epochs: 80
+  ema_decay: 0.99
+  use_ema: false
+  replay_cap: 2048
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: ARTIFACT PROBE
+# ════════════════════════════════════════════════════════════════════════════════════
+probe:
+  ckpt: outputs/ckpt/artifact_probe.pt
+  pretrain_epochs: 5
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# IGANER: EVALUATION (suppression curve)
+# ════════════════════════════════════════════════════════════════════════════════════
+eval:
+  curve_operator: fft_lowpass
+  curve_points: 11
+
+losses:
+  focal_gamma: 2.0
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# LOGIT SATURATION MONITOR — exactly CIFT
+# ════════════════════════════════════════════════════════════════════════════════════
+logit_saturation_monitor:
+  collapse_thr:        0.95
+  lambda_rescue:       0.30
+  lambda_target:       1.00
+  restore_epochs:      4
+  label_smooth_start:  0.10
+  label_smooth_end:    0.05
+  label_smooth_warmup: 5
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# EARLY STOPPING — exactly CIFT
+# ════════════════════════════════════════════════════════════════════════════════════
+early_stopping:
+  monitor:   "v/eer"
+  mode:      "min"
+  patience:  12
+  min_delta: 0.0005
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# CHECKPOINTING — exactly CIFT
+# ════════════════════════════════════════════════════════════════════════════════════
+checkpoint:
+  monitor:       "v/eer"
+  mode:          min
+  save_top_k:    3
+  save_last:     true
+  best_filename: "iganer-best-eer-epoch={epoch:02d}"
+  every_filename: "iganer-epoch={epoch:02d}"
+  save_epochs:   []
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# EXPERIMENT
+# ════════════════════════════════════════════════════════════════════════════════════
+experiment:
+  root_dir: "experiments"
+  name: "IGANER_ffpp_tableA"      # change per run: IGANER_v8_iganer, IGANER_tableA etc.
+
+# ════════════════════════════════════════════════════════════════════════════════════
+# WEIGHTS & BIASES
+# Setup: export WANDB_API_KEY=<your_key>  or  wandb login
+# ════════════════════════════════════════════════════════════════════════════════════
+wandb:
+  enabled: true
+  project: "IGANER_ICLR"
+  entity: null                     # ← SET THIS: your W&B username e.g. "sahilkumar15"
+  group: "iganer_tableA_ffpp"      # change per experiment
+  name: null                       # null = W&B auto-generates
+  tags:
+    - "iganer"
+    - "nashgame"
+    - "concealment"
+    - "convnextv2_base"
+    - "ffpp_rela"
+  notes: >
+    IGANER: Identity-Gap Adversarial Nash Equilibrium via Reinforcement learning.
+    Concealment game on top of CIFT. Table A factorial ablation on FF++ (c23).
+    Three factors: A=Nash game, B=saliency targeting, C=identity-gap protection.
+    RL training-only; inference is plain CIFT with zero added cost.
+  mode: "online"                   # "online" | "offline" | "disabled"
+  log_model: false

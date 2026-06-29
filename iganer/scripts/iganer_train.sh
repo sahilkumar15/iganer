@@ -7,3 +7,8 @@
 set -e
 GPU=${1:-0}; CFG=${2:-configs/iganer/iganer_ffpp.yaml}; TAG=${3:-iganer}; shift 3 || true
 CUDA_VISIBLE_DEVICES=$GPU python train_iganer.py -c "$CFG" --mode single --tag "$TAG" "$@"
+
+
+CUDA_VISIBLE_DEVICES=4,5,6,7 python train_iganer.py \
+    -c configs/iganer/train_general.yaml \
+    --mode tableA
