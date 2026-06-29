@@ -84,11 +84,12 @@ class CIFTImageDataset(Dataset):
 
 
 def build_cift_detector(cfg, device):
-    """Construct the real CIFT model exactly as train.py, wrap in CIFTAdapter."""
-    model_cfg = "configs/diffusionfake_mixed.yaml"
+    CIFT_ROOT = "/scratch/sahil/projects/img_deepfake/code/ImageDifussionFake"  # adjust if needed
+    model_cfg = os.path.join(CIFT_ROOT, "configs/diffusionfake_mixed.yaml")
     if not os.path.isfile(model_cfg):
-        model_cfg = "configs/diffusionfake.yaml"
+        model_cfg = os.path.join(CIFT_ROOT, "configs/diffusionfake.yaml")
     model = create_model(model_cfg).cpu()
+
     model.args = cfg
     backbone = getattr(getattr(cfg, "model", None), "backbone", "convnextv2_base")
     model.control_model.define_feature_filter(backbone)
@@ -100,7 +101,7 @@ def build_cift_detector(cfg, device):
         model.control_model.ablation = abl
 
     # load init weights (SD1.5+ControlNet) or a CIFT checkpoint
-    init_path = getattr(cfg, "ckpt_path", None) or "./models/control_sd15_ini.ckpt"
+    init_path = getattr(cfg, "ckpt_path", None) or os.path.join(CIFT_ROOT, "models/control_sd15_ini.ckpt")
     if cfg.detector.get("cift_ckpt", None) and os.path.isfile(cfg.detector.cift_ckpt):
         init_path = cfg.detector.cift_ckpt
     if os.path.isfile(init_path):

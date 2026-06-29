@@ -21,6 +21,7 @@
 # ════════════════════════════════════════════════════════════════════════════════════
 
 seed: 3407
+device: cuda
 torch_home: ""
 froze: false
 ckpt_path: null                      # SD1.5+ControlNet init; null = ./models/control_sd15_ini.ckpt
