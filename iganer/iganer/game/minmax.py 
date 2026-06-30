@@ -1,0 +1,117 @@
+"""
+iganer/game/minmax.py   (NEW)
+
+The SIGIL min-max game. One training step:
+
+  1. INNER (concealment / ascent): produce worst-case in-budget x' that suppresses
+     the fake cue. With PGDConcealer this is gradient ascent on the detector logit,
+     projected onto B(x). No RL — the inner problem is continuous & differentiable,
+     so PGD dominates any in-budget bandit (this is the paper's RL-justification).
+  2. OUTER (detector / descent): update theta to be correct on BOTH x and x',
+     invariant under concealment, and to keep the donor-target gap from collapsing.
+
+Genuine samples are not concealed toward 'real' (they already are real); optionally
+apply a *consistency* perturbation to genuine samples too, to avoid the detector
+learning "perturbed => fake". Default: conceal forged only, add the genuine images
+unperturbed to the robust term.
+
+This file is detector-agnostic via game/interfaces.SigilDetector.
+"""
+from __future__ import annotations
+from dataclasses import dataclass
+from typing import Optional, Dict
+import torch
+from torch import Tensor
+
+from iganer.losses.sigil_losses import (
+    classification_loss, suppression_invariance_loss,
+    identity_gap_consistency_loss, gap_from_embeddings, SigilLossWeights,
+)
+
+
+@dataclass
+class GameOutput:
+    loss: Tensor
+    logs: Dict[str, float]
+    x_concealed: Tensor
+
+
+def sigil_train_step(
+    detector,                      # SigilDetector (CIFT adapter)
+    concealer,                     # PGDConcealer or AmortizedConcealer
+    x: Tensor,                     # (B,3,H,W) observed faces in [0,1]
+    y: Tensor,                     # (B,) labels, 1=fake
+    weights: SigilLossWeights,
+    x_src: Optional[Tensor] = None,    # privileged donor refs (training-only)
+    conceal_genuine: bool = False,
+) -> GameOutput:
+    fake_mask = (y == 1)
+
+    # ---------------- INNER: worst-case concealment (no detector grad) ----------
+    detector_was_training = getattr(detector, "training", True)
+    x_conc = x.clone()
+    if fake_mask.any():
+        xf = x[fake_mask]
+        # PGDConcealer.forward internally manages grad; freeze detector params
+        for p in _detector_params(detector):
+            p.requires_grad_(False)
+        x_conc_f = concealer(detector, xf, suppress_toward_real=True) \
+            if _is_pgd(concealer) else concealer(xf)
+        for p in _detector_params(detector):
+            p.requires_grad_(True)
+        x_conc[fake_mask] = x_conc_f
+    if conceal_genuine and (~fake_mask).any():
+        xg = x[~fake_mask]
+        for p in _detector_params(detector):
+            p.requires_grad_(False)
+        x_conc_g = concealer(detector, xg, suppress_toward_real=False) \
+            if _is_pgd(concealer) else concealer(xg)
+        for p in _detector_params(detector):
+            p.requires_grad_(True)
+        x_conc[~fake_mask] = x_conc_g
+
+    x_conc = x_conc.detach()    # outer update does not backprop into the concealer
+
+    # ---------------- OUTER: detector descent -----------------------------------
+    logit_clean = detector.fake_logit(x)
+    logit_conc = detector.fake_logit(x_conc)
+
+    l_cls = classification_loss(logit_clean, y)
+    l_rob = classification_loss(logit_conc, y)              # correct under concealment
+    l_sig = suppression_invariance_loss(logit_clean, logit_conc)
+
+    l_gap = logit_clean.new_zeros(())
+    if x_src is not None and fake_mask.any():
+        gt_c, gs_c = detector.gap_embeddings(x[fake_mask], x_src[fake_mask])
+        gt_a, gs_a = detector.gap_embeddings(x_conc[fake_mask], x_src[fake_mask])
+        gap_clean = gap_from_embeddings(gt_c, gs_c)
+        gap_conc = gap_from_embeddings(gt_a, gs_a)
+        l_gap = identity_gap_consistency_loss(gap_clean, gap_conc)
+
+    loss = (weights.lam_cls * l_cls
+            + weights.lam_inv * l_rob
+            + weights.lam_sig * l_sig
+            + weights.lam_gap * l_gap)
+
+    logs = {
+        "loss": float(loss.detach()),
+        "l_cls": float(l_cls.detach()),
+        "l_robust": float(l_rob.detach()),
+        "l_sig": float(l_sig.detach()),
+        "l_idgap": float(l_gap.detach()) if torch.is_tensor(l_gap) else 0.0,
+        "logit_drop": float((logit_clean.detach() - logit_conc.detach())[fake_mask].mean())
+        if fake_mask.any() else 0.0,
+    }
+    return GameOutput(loss=loss, logs=logs, x_concealed=x_conc)
+
+
+# ----- small helpers so the loop works with either concealer / any detector -----
+def _is_pgd(concealer) -> bool:
+    return concealer.__class__.__name__ == "PGDConcealer"
+
+
+def _detector_params(detector):
+    # CIFT adapter should expose .parameters(); fall back to empty if not a Module
+    if hasattr(detector, "parameters"):
+        return list(detector.parameters())
+    return []
